@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+
+# Environment variables
+.env
+.env.local
+.env.production
+
+# Next.js
+.next/
+out/
+
+# Prisma (deprecated)
+/src/generated/prisma
+
+# WhatsApp sessions
+whatsapp-service/.wwebjs_sessions/
+whatsapp-service/node_modules/
+
+# Credentials
+credentials/
+
+# Debug logs
+*.log
+npm-debug.log*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build
+dist/
+build/
