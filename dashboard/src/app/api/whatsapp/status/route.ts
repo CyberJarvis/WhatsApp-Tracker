@@ -1,9 +1,10 @@
 import { NextResponse } from 'next/server'
 import { getServerSession } from 'next-auth'
 import { authOptions } from '@/lib/auth'
-import waManager from '@/lib/whatsapp-manager'
 import dbConnect from '@/lib/db'
 import User from '@/models/User'
+
+const WA_SERVICE_URL = process.env.WHATSAPP_SERVICE_URL || 'http://localhost:3002'
 
 export async function GET() {
   try {
@@ -18,17 +19,28 @@ export async function GET() {
 
     const userId = session.user.id
 
-    // Get status from WhatsApp manager
-    const clientStatus = waManager.getClientStatus(userId)
+    // Get status directly from WhatsApp service
+    let serviceStatus = { state: 'idle', isConnected: false, isInitialized: false, hasQR: false }
+    try {
+      const res = await fetch(`${WA_SERVICE_URL}/api/status/${userId}`, {
+        cache: 'no-store',
+      })
+      if (res.ok) {
+        serviceStatus = await res.json()
+      }
+    } catch (err) {
+      console.error('Error fetching WhatsApp service status:', err)
+    }
 
-    // Also get status from database
+    // Also get last seen from database
     await dbConnect()
-    const user = await User.findById(userId).select('waConnected waLastSeen')
+    const user = await User.findById(userId).select('waLastSeen')
 
     return NextResponse.json({
-      isConnected: clientStatus.isReady || user?.waConnected || false,
-      isInitialized: clientStatus.isInitialized,
-      hasQR: clientStatus.hasQR,
+      isConnected: serviceStatus.isConnected || serviceStatus.state === 'ready',
+      isInitialized: serviceStatus.isInitialized,
+      hasQR: serviceStatus.hasQR,
+      state: serviceStatus.state,
       lastSeen: user?.waLastSeen || null,
     })
   } catch (error) {

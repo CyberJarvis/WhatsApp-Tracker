@@ -4,6 +4,7 @@ import { authOptions } from '@/lib/auth'
 import dbConnect from '@/lib/db'
 import DailyStat from '@/models/DailyStat'
 import Group from '@/models/Group'
+import { getToday } from '@/lib/utils'
 
 export const dynamic = 'force-dynamic'
 
@@ -33,8 +34,8 @@ export async function GET(request: NextRequest) {
     } else if (date) {
       query.date = date
     } else {
-      // Default to today
-      query.date = new Date().toISOString().split('T')[0]
+      // Default to today (IST)
+      query.date = getToday()
     }
 
     const stats = await DailyStat.find(query)

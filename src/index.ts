@@ -48,6 +48,15 @@ async function main(): Promise<void> {
     await whatsAppService.initialize();
     logger.info('WhatsApp client ready');
 
+    // Set user ID for message tracking if configured
+    const dashboardUserId = process.env.DASHBOARD_USER_ID;
+    if (dashboardUserId) {
+      whatsAppService.setUserId(dashboardUserId);
+      logger.info('Message tracking enabled for dashboard');
+    } else {
+      logger.warn('DASHBOARD_USER_ID not set - message tracking disabled');
+    }
+
     // Start the scheduler
     logger.info('Starting job scheduler...');
     startScheduler();

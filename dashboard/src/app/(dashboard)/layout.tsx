@@ -2,6 +2,7 @@ import { getServerSession } from 'next-auth'
 import { redirect } from 'next/navigation'
 import { authOptions } from '@/lib/auth'
 import { Sidebar } from '@/components/layout/Sidebar'
+import { DashboardProviders } from '@/components/providers/DashboardProviders'
 
 export default async function DashboardLayout({
   children,
@@ -22,9 +23,11 @@ export default async function DashboardLayout({
   return (
     <div className="flex h-screen bg-gray-100">
       <Sidebar />
-      <main className="flex-1 overflow-auto">
-        {children}
-      </main>
+      <DashboardProviders>
+        <main className="flex-1 overflow-auto">
+          {children}
+        </main>
+      </DashboardProviders>
     </div>
   )
 }

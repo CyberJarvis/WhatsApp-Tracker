@@ -4,19 +4,25 @@ import { useState } from 'react';
 import Link from 'next/link';
 import { Search, ArrowUpDown, ExternalLink } from 'lucide-react';
 import { Badge } from '@/components/ui/Badge';
+import { GroupClusterTags } from '@/components/clusters/GroupClusterTags';
 import { formatNumber, formatGrowth, getGrowthColor, truncateGroupId } from '@/lib/utils';
-import type { GroupWithStats } from '@/lib/types';
+import type { GroupWithStats, ClusterSummary } from '@/lib/types';
+
+interface GroupWithClusters extends GroupWithStats {
+  clusters?: ClusterSummary[];
+}
 
 interface GroupsTableProps {
-  groups: GroupWithStats[];
+  groups: GroupWithClusters[];
   showSearch?: boolean;
   limit?: number;
+  showClusters?: boolean;
 }
 
 type SortField = 'groupName' | 'currentMembers' | 'todayGrowth';
 type SortDirection = 'asc' | 'desc';
 
-export function GroupsTable({ groups, showSearch = true, limit }: GroupsTableProps) {
+export function GroupsTable({ groups, showSearch = true, limit, showClusters = true }: GroupsTableProps) {
   const [search, setSearch] = useState('');
   const [sortField, setSortField] = useState<SortField>('currentMembers');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
@@ -31,12 +37,18 @@ export function GroupsTable({ groups, showSearch = true, limit }: GroupsTablePro
   };
 
   let filteredGroups = groups.filter((group) =>
-    group.groupName.toLowerCase().includes(search.toLowerCase())
+    (group.groupName || '').toLowerCase().includes(search.toLowerCase())
   );
 
   filteredGroups = [...filteredGroups].sort((a, b) => {
-    const aVal = a[sortField];
-    const bVal = b[sortField];
+    let aVal = a[sortField];
+    let bVal = b[sortField];
+
+    // Handle undefined values for string fields
+    if (sortField === 'groupName') {
+      aVal = aVal || '';
+      bVal = bVal || '';
+    }
 
     if (typeof aVal === 'string' && typeof bVal === 'string') {
       return sortDirection === 'asc'
@@ -83,6 +95,7 @@ export function GroupsTable({ groups, showSearch = true, limit }: GroupsTablePro
                   <ArrowUpDown className="h-3 w-3" />
                 </button>
               </th>
+              {showClusters && <th className="px-4 py-3">Categories</th>}
               <th className="px-4 py-3">Group ID</th>
               <th className="px-4 py-3">
                 <button
@@ -113,8 +126,13 @@ export function GroupsTable({ groups, showSearch = true, limit }: GroupsTablePro
                 className="text-sm hover:bg-gray-50"
               >
                 <td className="px-4 py-3 font-medium text-gray-900">
-                  {group.groupName}
+                  {group.groupName || 'Unnamed Group'}
                 </td>
+                {showClusters && (
+                  <td className="px-4 py-3">
+                    <GroupClusterTags clusters={group.clusters || []} />
+                  </td>
+                )}
                 <td className="px-4 py-3 font-mono text-xs text-gray-500">
                   {truncateGroupId(group.groupId)}
                 </td>

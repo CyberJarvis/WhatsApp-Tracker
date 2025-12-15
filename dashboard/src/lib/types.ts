@@ -76,6 +76,17 @@ export interface TrendDataPoint {
   netGrowth: number;
 }
 
+export interface AnomalyRecord {
+  groupId: string;
+  groupName: string;
+  date: string;
+  previousMembers: number;
+  currentMembers: number;
+  netGrowth: number;
+  percentageChange: number;
+  notes: string;
+}
+
 export interface ExportRequest {
   type: 'csv' | 'excel' | 'pdf';
   dateRange: {
@@ -83,4 +94,44 @@ export interface ExportRequest {
     to: string;
   };
   groupIds?: string[];
+}
+
+// Cluster (Category) types
+export interface Cluster {
+  _id: string;
+  name: string;
+  description?: string;
+  color: string;
+  userId: string;
+  groupIds: string[];
+  groupCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ClusterSummary {
+  _id: string;
+  name: string;
+  color: string;
+}
+
+export interface CreateClusterInput {
+  name: string;
+  description?: string;
+  color: string;
+}
+
+export interface UpdateClusterInput {
+  name?: string;
+  description?: string;
+  color?: string;
+}
+
+export interface ClusterFilterState {
+  selectedClusterIds: string[];
+  clusterFilterMode: 'all' | 'selected';
+}
+
+export interface GroupWithClusters extends GroupWithStats {
+  clusters: ClusterSummary[];
 }

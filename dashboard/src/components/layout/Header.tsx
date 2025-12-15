@@ -1,14 +1,17 @@
 'use client';
 
-import { RefreshCw, Bell, Clock } from 'lucide-react';
+import { RefreshCw, Clock } from 'lucide-react';
 import { useState, useEffect } from 'react';
+import { GroupSelector } from '@/components/groups/GroupSelector';
+import { NotificationBell } from '@/components/alerts/NotificationBell';
 
 interface HeaderProps {
   title: string;
   subtitle?: string;
+  showGroupFilter?: boolean;
 }
 
-export function Header({ title, subtitle }: HeaderProps) {
+export function Header({ title, subtitle, showGroupFilter = true }: HeaderProps) {
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
   const [isRefreshing, setIsRefreshing] = useState(false);
 
@@ -49,6 +52,9 @@ export function Header({ title, subtitle }: HeaderProps) {
       </div>
 
       <div className="flex items-center gap-4">
+        {/* Group Filter */}
+        {showGroupFilter && <GroupSelector />}
+
         {/* Last Update */}
         <div className="flex items-center gap-2 text-sm text-gray-500">
           <Clock className="h-4 w-4" />
@@ -66,12 +72,7 @@ export function Header({ title, subtitle }: HeaderProps) {
         </button>
 
         {/* Notifications */}
-        <button className="relative rounded-lg border border-gray-300 bg-white p-2 text-gray-700 transition-colors hover:bg-gray-50">
-          <Bell className="h-5 w-5" />
-          <span className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-xs text-white">
-            3
-          </span>
-        </button>
+        <NotificationBell />
       </div>
     </header>
   );

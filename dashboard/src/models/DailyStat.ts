@@ -58,6 +58,9 @@ const DailyStatSchema = new Schema<IDailyStat>(
 // Compound unique index: one stat per user, group, and date
 DailyStatSchema.index({ userId: 1, groupId: 1, date: 1 }, { unique: true })
 
+// Index for querying by groupId and date (used in groups API batch queries)
+DailyStatSchema.index({ groupId: 1, date: 1 })
+
 const DailyStat: Model<IDailyStat> = mongoose.models.DailyStat || mongoose.model<IDailyStat>('DailyStat', DailyStatSchema)
 
 export default DailyStat

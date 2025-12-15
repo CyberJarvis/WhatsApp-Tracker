@@ -1,6 +1,6 @@
 'use client';
 
-import { AlertTriangle, TrendingDown, X } from 'lucide-react';
+import { AlertTriangle, TrendingDown, X, CheckCircle } from 'lucide-react';
 import { Card } from '@/components/ui/Card';
 import { Badge } from '@/components/ui/Badge';
 import { formatNumber, formatPercentage } from '@/lib/utils';
@@ -16,11 +16,11 @@ export function AnomalyAlerts({ anomalies }: AnomalyAlertsProps) {
       <Card className="bg-green-50 border-green-200">
         <div className="flex items-center gap-3">
           <div className="rounded-full bg-green-100 p-2">
-            <AlertTriangle className="h-5 w-5 text-green-600" />
+            <CheckCircle className="h-5 w-5 text-green-600" />
           </div>
           <div>
             <p className="font-medium text-green-900">All Clear</p>
-            <p className="text-sm text-green-700">No anomalies detected today</p>
+            <p className="text-sm text-green-700">No anomalies detected in selected period</p>
           </div>
         </div>
       </Card>

@@ -1,15 +1,6 @@
 'use client';
 
-import {
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-  Cell,
-} from 'recharts';
+import { TrendingUp, TrendingDown } from 'lucide-react';
 import { formatNumber } from '@/lib/utils';
 import type { GroupAnalytics } from '@/lib/types';
 
@@ -24,15 +15,7 @@ export function GrowthBarChart({ data, type, limit = 5 }: GrowthBarChartProps) {
     .sort((a, b) =>
       type === 'gainers' ? b.netGrowth - a.netGrowth : a.netGrowth - b.netGrowth
     )
-    .slice(0, limit)
-    .map((item) => ({
-      name: item.groupName.length > 20
-        ? item.groupName.substring(0, 20) + '...'
-        : item.groupName,
-      value: item.netGrowth,
-      fullName: item.groupName,
-      members: item.currentMembers,
-    }));
+    .slice(0, limit);
 
   if (sortedData.length === 0) {
     return (
@@ -42,47 +25,40 @@ export function GrowthBarChart({ data, type, limit = 5 }: GrowthBarChartProps) {
     );
   }
 
-  const barColor = type === 'gainers' ? '#22c55e' : '#ef4444';
+  const isGainer = type === 'gainers';
 
   return (
-    <ResponsiveContainer width="100%" height={200}>
-      <BarChart
-        data={sortedData}
-        layout="vertical"
-        margin={{ top: 5, right: 30, left: 100, bottom: 5 }}
-      >
-        <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-        <XAxis type="number" tick={{ fontSize: 12, fill: '#6b7280' }} />
-        <YAxis
-          type="category"
-          dataKey="name"
-          tick={{ fontSize: 12, fill: '#6b7280' }}
-          width={95}
-        />
-        <Tooltip
-          formatter={(value: number) => [
-            `${value > 0 ? '+' : ''}${formatNumber(value)}`,
-            'Net Growth',
-          ]}
-          labelFormatter={(label, payload) => {
-            if (payload && payload[0]) {
-              return `${payload[0].payload.fullName} (${formatNumber(payload[0].payload.members)} members)`;
-            }
-            return label;
-          }}
-          contentStyle={{
-            backgroundColor: 'white',
-            border: '1px solid #e5e7eb',
-            borderRadius: '8px',
-            boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)',
-          }}
-        />
-        <Bar dataKey="value" radius={[0, 4, 4, 0]}>
-          {sortedData.map((entry, index) => (
-            <Cell key={`cell-${index}`} fill={barColor} />
-          ))}
-        </Bar>
-      </BarChart>
-    </ResponsiveContainer>
+    <div className="space-y-3">
+      {sortedData.map((item, index) => (
+        <div
+          key={item.groupId}
+          className="flex items-center justify-between rounded-lg border border-gray-100 bg-gray-50 px-4 py-3 transition-colors hover:bg-gray-100"
+        >
+          <div className="flex items-center gap-3 min-w-0 flex-1">
+            <span className="flex h-6 w-6 items-center justify-center rounded-full bg-gray-200 text-xs font-medium text-gray-600">
+              {index + 1}
+            </span>
+            <div className="min-w-0 flex-1">
+              <p className="truncate font-medium text-gray-900" title={item.groupName}>
+                {item.groupName || 'Unnamed Group'}
+              </p>
+              <p className="text-xs text-gray-500">
+                {formatNumber(item.currentMembers)} members
+              </p>
+            </div>
+          </div>
+          <div className={`flex items-center gap-1.5 ${isGainer ? 'text-green-600' : 'text-red-600'}`}>
+            {isGainer ? (
+              <TrendingUp className="h-4 w-4" />
+            ) : (
+              <TrendingDown className="h-4 w-4" />
+            )}
+            <span className="font-semibold">
+              {item.netGrowth > 0 ? '+' : ''}{formatNumber(item.netGrowth)}
+            </span>
+          </div>
+        </div>
+      ))}
+    </div>
   );
 }

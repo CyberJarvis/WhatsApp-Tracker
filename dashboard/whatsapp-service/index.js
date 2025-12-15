@@ -9,6 +9,27 @@ const { google } = require('googleapis');
 // Load .env from parent directory
 require('dotenv').config({ path: path.join(__dirname, '../../.env') });
 
+// IST (Indian Standard Time) helpers
+function getISTDate() {
+  const now = new Date();
+  // IST is UTC+5:30
+  const istOffset = 5.5 * 60 * 60 * 1000;
+  const utcOffset = now.getTimezoneOffset() * 60 * 1000;
+  return new Date(now.getTime() + utcOffset + istOffset);
+}
+
+function getISTDateString() {
+  const ist = getISTDate();
+  const year = ist.getFullYear();
+  const month = String(ist.getMonth() + 1).padStart(2, '0');
+  const day = String(ist.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function getISTHour() {
+  return getISTDate().getHours();
+}
+
 // Scheduling intervals
 const SYNC_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
 const syncIntervals = new Map(); // Store sync intervals per user
@@ -42,6 +63,7 @@ require('events').EventEmitter.defaultMaxListeners = 50;
 const userClients = new Map();
 const userQRCodes = new Map();
 const userStates = new Map(); // 'idle' | 'initializing' | 'qr_ready' | 'authenticated' | 'ready' | 'error'
+const userContactsCache = new Map(); // Cache of userId -> Map<phone, name> for admin matching
 
 // MongoDB User Schema (simplified)
 const UserSchema = new mongoose.Schema({
@@ -78,18 +100,112 @@ const DailyStatSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
 });
 
-let User, Group, Snapshot, DailyStat;
+// Message tracking schema
+const MessageSchema = new mongoose.Schema({
+  messageId: { type: String, required: true, index: true },
+  groupId: { type: mongoose.Schema.Types.ObjectId, ref: 'Group', required: true, index: true },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  senderId: { type: String, required: true, index: true },
+  senderName: { type: String, default: 'Unknown' },
+  timestamp: { type: Date, required: true, index: true },
+  content: { type: String, default: '', maxlength: 1000 },
+  mediaType: { type: String, enum: ['text', 'image', 'video', 'audio', 'document', 'sticker', 'location', 'contact'], default: 'text' },
+  isFromAdmin: { type: Boolean, default: false },
+  hasMedia: { type: Boolean, default: false },
+}, { timestamps: true });
+MessageSchema.index({ messageId: 1, userId: 1 }, { unique: true });
+MessageSchema.index({ groupId: 1, timestamp: -1 });
 
-// Connect to MongoDB
-mongoose.connect(MONGODB_URI)
-  .then(() => {
-    console.log('Connected to MongoDB');
-    User = mongoose.model('User', UserSchema);
-    Group = mongoose.model('Group', GroupSchema);
-    Snapshot = mongoose.model('Snapshot', SnapshotSchema);
-    DailyStat = mongoose.model('DailyStat', DailyStatSchema);
-  })
-  .catch(err => console.error('MongoDB connection error:', err));
+// Message stats schema (hourly/daily aggregates)
+const MessageStatsSchema = new mongoose.Schema({
+  date: { type: String, required: true, index: true },
+  hour: { type: Number, min: 0, max: 23 },
+  groupId: { type: mongoose.Schema.Types.ObjectId, ref: 'Group', required: true, index: true },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  totalMessages: { type: Number, default: 0 },
+  adminMessages: { type: Number, default: 0 },
+  userMessages: { type: Number, default: 0 },
+  mediaCount: {
+    text: { type: Number, default: 0 },
+    image: { type: Number, default: 0 },
+    video: { type: Number, default: 0 },
+    audio: { type: Number, default: 0 },
+    document: { type: Number, default: 0 },
+    sticker: { type: Number, default: 0 },
+    other: { type: Number, default: 0 },
+  },
+  uniqueSenders: { type: Number, default: 0 },
+}, { timestamps: true });
+MessageStatsSchema.index({ userId: 1, groupId: 1, date: 1, hour: 1 }, { unique: true });
+
+// Member activity schema
+const MemberActivitySchema = new mongoose.Schema({
+  memberId: { type: String, required: true, index: true },
+  memberName: { type: String, default: 'Unknown' },
+  groupId: { type: mongoose.Schema.Types.ObjectId, ref: 'Group', required: true, index: true },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  messageCount: { type: Number, default: 0, index: true },
+  todayMessageCount: { type: Number, default: 0 },
+  weekMessageCount: { type: Number, default: 0 },
+  lastMessageAt: { type: Date },
+  firstSeenAt: { type: Date, default: Date.now },
+  lastSeenAt: { type: Date, default: Date.now },
+  isAdmin: { type: Boolean, default: false },
+  isActive: { type: Boolean, default: true },
+  activityLevel: { type: String, enum: ['high', 'moderate', 'low', 'inactive'], default: 'low' },
+}, { timestamps: true });
+MemberActivitySchema.index({ userId: 1, groupId: 1, memberId: 1 }, { unique: true });
+MemberActivitySchema.index({ groupId: 1, messageCount: -1 });
+
+// Member event schema (join/leave history)
+const MemberEventSchema = new mongoose.Schema({
+  memberId: { type: String, required: true, index: true },
+  memberName: { type: String },
+  groupId: { type: mongoose.Schema.Types.ObjectId, ref: 'Group', required: true, index: true },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  eventType: { type: String, enum: ['join', 'leave'], required: true, index: true },
+  timestamp: { type: Date, required: true, index: true },
+  detectedVia: { type: String, enum: ['real-time', 'snapshot-diff'], default: 'real-time' },
+  triggeredBy: { type: String },
+}, { timestamps: { createdAt: true, updatedAt: false } });
+MemberEventSchema.index({ groupId: 1, timestamp: -1 });
+
+let User, Group, Snapshot, DailyStat, Message, MessageStats, MemberActivity, MemberEvent;
+
+// Connect to MongoDB with retry logic
+async function connectToMongoDB(retries = 5) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      console.log(`Connecting to MongoDB (attempt ${i + 1}/${retries})...`);
+      await mongoose.connect(MONGODB_URI, {
+        serverSelectionTimeoutMS: 30000,
+        socketTimeoutMS: 45000,
+        maxPoolSize: 10,
+      });
+      console.log('Connected to MongoDB');
+      User = mongoose.model('User', UserSchema);
+      Group = mongoose.model('Group', GroupSchema);
+      Snapshot = mongoose.model('Snapshot', SnapshotSchema);
+      DailyStat = mongoose.model('DailyStat', DailyStatSchema);
+      Message = mongoose.model('Message', MessageSchema);
+      MessageStats = mongoose.model('MessageStats', MessageStatsSchema);
+      MemberActivity = mongoose.model('MemberActivity', MemberActivitySchema);
+      MemberEvent = mongoose.model('MemberEvent', MemberEventSchema);
+      return true;
+    } catch (err) {
+      console.error(`MongoDB connection attempt ${i + 1} failed:`, err.message);
+      if (i < retries - 1) {
+        console.log('Retrying in 5 seconds...');
+        await new Promise(resolve => setTimeout(resolve, 5000));
+      }
+    }
+  }
+  console.error('Failed to connect to MongoDB after all retries');
+  return false;
+}
+
+// Start MongoDB connection
+connectToMongoDB();
 
 // Get user state
 function getUserState(userId) {
@@ -115,6 +231,323 @@ async function cleanupClient(userId) {
   }
   userClients.delete(userId);
   userQRCodes.delete(userId);
+}
+
+// ========== Message & Member Event Handlers ==========
+
+// Determine media type from message
+function getMediaType(message) {
+  if (message.hasMedia) {
+    if (message.type === 'image') return 'image';
+    if (message.type === 'video' || message.type === 'ptt') return 'video';
+    if (message.type === 'audio') return 'audio';
+    if (message.type === 'document') return 'document';
+    if (message.type === 'sticker') return 'sticker';
+    if (message.type === 'location') return 'location';
+    if (message.type === 'vcard') return 'contact';
+    return 'document';
+  }
+  return 'text';
+}
+
+// Calculate activity level based on message count
+function calculateActivityLevel(messageCount, daysSinceLastMessage) {
+  if (daysSinceLastMessage > 7) return 'inactive';
+  if (messageCount >= 50) return 'high';
+  if (messageCount >= 10) return 'moderate';
+  return 'low';
+}
+
+// Handle incoming group message
+async function handleGroupMessage(userId, message, client) {
+  if (!Message || !Group) return;
+
+  try {
+    const groupId = message.from;
+    if (!groupId.includes('@g.us')) return;
+
+    // Find the group in our database
+    const group = await Group.findOne({ userId, groupId });
+    if (!group) return;
+
+    // Get sender info from message properties (avoid getContact() which can fail)
+    const senderId = message.author || message.from;
+    // Try to get sender name from available properties
+    let senderName = 'Unknown';
+    try {
+      // Try _data.notifyName first (most reliable)
+      if (message._data?.notifyName) {
+        senderName = message._data.notifyName;
+      } else if (message._data?.pushname) {
+        senderName = message._data.pushname;
+      }
+    } catch (e) {
+      // Fallback to Unknown
+    }
+
+    // Check if sender is admin
+    // Due to WhatsApp Web API limitations (@lid vs @c.us ID mismatch),
+    // we log the message data once to understand the structure
+    let isFromAdmin = false;
+    try {
+      // Log message structure once per session for debugging
+      if (!global._messageStructureLogged) {
+        console.log(`[${userId}] Message _data keys:`, Object.keys(message._data || {}).join(', '));
+        console.log(`[${userId}] Author info:`, JSON.stringify({
+          author: message.author,
+          from: message.from,
+          _data_author: message._data?.author,
+          _data_participant: message._data?.participant,
+          _data_quotedParticipant: message._data?.quotedParticipant,
+        }));
+        global._messageStructureLogged = true;
+      }
+
+      const chat = await client.getChatById(groupId);
+
+      if (chat && chat.isGroup && chat.participants && chat.participants.length > 0) {
+        // Find admin participants and their @lid equivalents if available
+        const admins = chat.participants.filter(p => p.isAdmin || p.isSuperAdmin);
+
+        // Try to find if sender's @lid ID has a mapping to an admin @c.us ID
+        // WhatsApp sometimes provides mappings through participant.id
+        for (const admin of admins) {
+          // Check if there's any link between sender's lid and admin's c.us
+          // Also check if message._data has participant info in @c.us format
+          const participantId = message._data?.participant || message._data?.author || '';
+
+          if (participantId && admin.id?._serialized === participantId) {
+            isFromAdmin = true;
+            console.log(`[${userId}] ADMIN MATCH (participant): ${participantId}`);
+            break;
+          }
+        }
+
+        if (!isFromAdmin) {
+          // Log admin info occasionally for debugging
+          if (Math.random() < 0.05) {
+            const adminIds = admins.map(a => a.id?._serialized).slice(0, 3);
+            console.log(`[${userId}] No admin match. Sender: "${senderName}" (${senderId}), Admins sample: ${adminIds.join(', ')}`);
+          }
+        }
+      }
+    } catch (err) {
+      console.log(`[${userId}] Admin check error: ${err.message}`);
+    }
+
+    const mediaType = getMediaType(message);
+    const today = getISTDateString();
+    const currentHour = getISTHour();
+
+    // Save message (with deduplication)
+    try {
+      await Message.findOneAndUpdate(
+        { messageId: message.id.id, userId },
+        {
+          messageId: message.id.id,
+          groupId: group._id,
+          userId,
+          senderId,
+          senderName,
+          timestamp: new Date(message.timestamp * 1000),
+          content: (message.body || '').substring(0, 1000),
+          mediaType,
+          isFromAdmin,
+          hasMedia: message.hasMedia,
+        },
+        { upsert: true, new: true }
+      );
+    } catch (err) {
+      if (err.code !== 11000) { // Ignore duplicate key errors
+        console.error(`[${userId}] Error saving message:`, err.message);
+      }
+      return;
+    }
+
+    // Update message stats (hourly)
+    const mediaCountField = `mediaCount.${mediaType === 'text' ? 'text' : mediaType}`;
+    await MessageStats.findOneAndUpdate(
+      { userId, groupId: group._id, date: today, hour: currentHour },
+      {
+        $inc: {
+          totalMessages: 1,
+          adminMessages: isFromAdmin ? 1 : 0,
+          userMessages: isFromAdmin ? 0 : 1,
+          [mediaCountField]: 1,
+        },
+        $setOnInsert: { userId, groupId: group._id, date: today, hour: currentHour },
+      },
+      { upsert: true }
+    );
+
+    // Update member activity
+    if (MemberActivity) {
+      await MemberActivity.findOneAndUpdate(
+        { userId, groupId: group._id, memberId: senderId },
+        {
+          $inc: { messageCount: 1, todayMessageCount: 1, weekMessageCount: 1 },
+          $set: {
+            memberName: senderName,
+            lastMessageAt: now,
+            lastSeenAt: now,
+            isAdmin: isFromAdmin,
+            isActive: true,
+          },
+          $setOnInsert: { userId, groupId: group._id, memberId: senderId, firstSeenAt: now },
+        },
+        { upsert: true }
+      );
+    }
+
+    // Update group activity
+    await Group.findByIdAndUpdate(group._id, {
+      $inc: { totalMessageCount: 1, todayMessageCount: 1, weekMessageCount: 1 },
+      $set: { lastMessageAt: now, activityStatus: 'active', lastActivityCheck: now },
+    });
+
+  } catch (err) {
+    console.error(`[${userId}] Error handling message:`, err.message);
+  }
+}
+
+// Handle member join event
+async function handleMemberJoin(userId, notification) {
+  if (!MemberEvent || !MemberActivity || !Group) return;
+
+  try {
+    const groupId = notification.chatId;
+    const group = await Group.findOne({ userId, groupId });
+    if (!group) return;
+
+    const recipientIds = notification.recipientIds || [];
+    const now = new Date();
+
+    for (const memberId of recipientIds) {
+      // Create member event
+      await MemberEvent.create({
+        memberId,
+        memberName: null, // Will be updated when they send a message
+        groupId: group._id,
+        userId,
+        eventType: 'join',
+        timestamp: now,
+        detectedVia: 'real-time',
+        triggeredBy: notification.author,
+      });
+
+      // Create/update member activity
+      await MemberActivity.findOneAndUpdate(
+        { userId, groupId: group._id, memberId },
+        {
+          $set: { isActive: true, lastSeenAt: now },
+          $setOnInsert: { userId, groupId: group._id, memberId, firstSeenAt: now, messageCount: 0 },
+        },
+        { upsert: true }
+      );
+    }
+
+    console.log(`[${userId}] ${recipientIds.length} member(s) joined group ${group.groupName}`);
+
+    // Update group member count
+    await Group.findByIdAndUpdate(group._id, {
+      $inc: { currentMemberCount: recipientIds.length },
+    });
+
+  } catch (err) {
+    console.error(`[${userId}] Error handling member join:`, err.message);
+  }
+}
+
+// Handle member leave event
+async function handleMemberLeave(userId, notification) {
+  if (!MemberEvent || !MemberActivity || !Group) return;
+
+  try {
+    const groupId = notification.chatId;
+    const group = await Group.findOne({ userId, groupId });
+    if (!group) return;
+
+    const recipientIds = notification.recipientIds || [];
+    const now = new Date();
+
+    for (const memberId of recipientIds) {
+      // Create member event
+      await MemberEvent.create({
+        memberId,
+        groupId: group._id,
+        userId,
+        eventType: 'leave',
+        timestamp: now,
+        detectedVia: 'real-time',
+        triggeredBy: notification.author,
+      });
+
+      // Update member activity
+      await MemberActivity.findOneAndUpdate(
+        { userId, groupId: group._id, memberId },
+        { $set: { isActive: false, lastSeenAt: now } }
+      );
+    }
+
+    console.log(`[${userId}] ${recipientIds.length} member(s) left group ${group.groupName}`);
+
+    // Update group member count
+    await Group.findByIdAndUpdate(group._id, {
+      $inc: { currentMemberCount: -recipientIds.length },
+    });
+
+  } catch (err) {
+    console.error(`[${userId}] Error handling member leave:`, err.message);
+  }
+}
+
+// Reset daily message counts (call at midnight)
+async function resetDailyMessageCounts() {
+  try {
+    await MemberActivity.updateMany({}, { $set: { todayMessageCount: 0 } });
+    await Group.updateMany({}, { $set: { todayMessageCount: 0 } });
+    console.log('Reset daily message counts');
+  } catch (err) {
+    console.error('Error resetting daily counts:', err.message);
+  }
+}
+
+// Reset weekly message counts (call on Sunday midnight)
+async function resetWeeklyMessageCounts() {
+  try {
+    await MemberActivity.updateMany({}, { $set: { weekMessageCount: 0 } });
+    await Group.updateMany({}, { $set: { weekMessageCount: 0 } });
+    console.log('Reset weekly message counts');
+  } catch (err) {
+    console.error('Error resetting weekly counts:', err.message);
+  }
+}
+
+// Schedule daily/weekly resets (using IST midnight)
+function scheduleDailyResets() {
+  const now = new Date();
+  const istNow = getISTDate();
+
+  // Calculate ms until midnight IST
+  const istMidnight = new Date(istNow.getFullYear(), istNow.getMonth(), istNow.getDate() + 1, 0, 0, 0);
+  const msUntilMidnightIST = istMidnight - istNow;
+
+  // Reset daily counts at midnight IST
+  setTimeout(() => {
+    resetDailyMessageCounts();
+    // Then repeat every 24 hours
+    setInterval(resetDailyMessageCounts, 24 * 60 * 60 * 1000);
+  }, msUntilMidnightIST);
+
+  // Reset weekly counts on Sunday IST
+  const daysUntilSunday = (7 - istNow.getDay()) % 7 || 7;
+  const msUntilSundayIST = msUntilMidnightIST + (daysUntilSunday - 1) * 24 * 60 * 60 * 1000;
+
+  setTimeout(() => {
+    resetWeeklyMessageCounts();
+    // Then repeat every 7 days
+    setInterval(resetWeeklyMessageCounts, 7 * 24 * 60 * 60 * 1000);
+  }, msUntilSundayIST);
 }
 
 // Background sync member counts
@@ -262,6 +695,23 @@ async function initializeClient(userId) {
     setUserState(userId, 'ready');
     userQRCodes.delete(userId);
 
+    // Cache contacts for admin matching
+    try {
+      const contacts = await client.getContacts();
+      const contactMap = new Map();
+      for (const contact of contacts) {
+        const phone = contact.id?.user || contact.number;
+        const name = contact.pushname || contact.name || contact.verifiedName || '';
+        if (phone && name) {
+          contactMap.set(phone, name);
+        }
+      }
+      userContactsCache.set(userId, contactMap);
+      console.log(`[${userId}] Cached ${contactMap.size} contacts for admin matching`);
+    } catch (e) {
+      console.log(`[${userId}] Failed to cache contacts: ${e.message}`);
+    }
+
     // Update user in database
     try {
       if (User) {
@@ -337,6 +787,51 @@ async function initializeClient(userId) {
     await cleanupClient(userId);
   });
 
+  // ========== Message & Member Event Listeners ==========
+
+  // Track incoming messages in groups
+  client.on('message', async (message) => {
+    try {
+      console.log(`[${userId}] Message received from: ${message.from}`);
+      if (message.from && message.from.includes('@g.us')) {
+        await handleGroupMessage(userId, message, client);
+      }
+    } catch (err) {
+      console.log(`[${userId}] Message handler error: ${err.message}`);
+    }
+  });
+
+  // Track outgoing messages (messages sent by user)
+  client.on('message_create', async (message) => {
+    try {
+      if (message.fromMe && message.to && message.to.includes('@g.us')) {
+        // For outgoing messages, 'to' is the group
+        const modifiedMessage = { ...message, from: message.to };
+        await handleGroupMessage(userId, modifiedMessage, client);
+      }
+    } catch (err) {
+      // Silently ignore message handling errors
+    }
+  });
+
+  // Track member joins
+  client.on('group_join', async (notification) => {
+    try {
+      await handleMemberJoin(userId, notification);
+    } catch (err) {
+      console.error(`[${userId}] Error in group_join handler:`, err.message);
+    }
+  });
+
+  // Track member leaves
+  client.on('group_leave', async (notification) => {
+    try {
+      await handleMemberLeave(userId, notification);
+    } catch (err) {
+      console.error(`[${userId}] Error in group_leave handler:`, err.message);
+    }
+  });
+
   // Initialize (don't await, let it run in background)
   client.initialize().catch(async (err) => {
     console.error(`[${userId}] Error initializing client:`, err.message);
@@ -359,6 +854,8 @@ app.get('/api/status/health', (req, res) => {
 });
 
 // Get QR code for user
+// This endpoint only returns current state - does NOT trigger initialization
+// User must POST to /api/init/:userId to start initialization
 app.get('/api/qr/:userId', async (req, res) => {
   const { userId } = req.params;
   const state = getUserState(userId);
@@ -384,14 +881,14 @@ app.get('/api/qr/:userId', async (req, res) => {
     return res.json({ status: 'error', message: 'Connection failed. Please try again.' });
   }
 
-  // If idle, start initialization
-  if (state === 'idle') {
-    initializeClient(userId);
-    return res.json({ status: 'initializing' });
+  // If initializing, wait for QR
+  if (state === 'initializing') {
+    return res.json({ status: 'waiting' });
   }
 
-  // If initializing, wait for QR
-  return res.json({ status: 'waiting' });
+  // If idle, return idle - user needs to explicitly POST to /api/init to start
+  // This prevents QR generation from background polling
+  return res.json({ status: 'idle', message: 'Not connected. Click Connect to scan QR code.' });
 });
 
 // Initialize client
@@ -536,7 +1033,7 @@ app.post('/api/sync/:userId', async (req, res) => {
       return res.status(500).json({ error: 'Database models not ready' });
     }
 
-    const today = new Date().toISOString().split('T')[0];
+    const today = getISTDateString();
     let syncedCount = 0;
     let totalMembers = 0;
     let totalJoined = 0;
@@ -656,7 +1153,7 @@ function startAutoSync(userId) {
       const chats = await client.getChats();
       const groups = chats.filter(chat => chat.isGroup);
 
-      const today = new Date().toISOString().split('T')[0];
+      const today = getISTDateString();
       let totalMembers = 0;
       let totalJoined = 0;
       let totalLeft = 0;
@@ -771,7 +1268,7 @@ async function exportToGoogleSheets(userId) {
 
     // Get all groups with their latest snapshots
     const groups = await Group.find({ userId, isActive: true }).lean();
-    const today = new Date().toISOString().split('T')[0];
+    const today = getISTDateString();
 
     const rows = [
       ['Date', 'Group Name', 'Group ID', 'Total Members', 'Synced At'],
@@ -849,6 +1346,7 @@ app.post('/api/export/:userId', async (req, res) => {
 });
 
 // Auto-reconnect users with saved sessions on startup
+// Only reconnects if session is valid - does NOT generate QR codes
 async function autoReconnectUsers() {
   const fs = require('fs');
   const sessionsDir = path.join(__dirname, '.wwebjs_sessions');
@@ -871,9 +1369,9 @@ async function autoReconnectUsers() {
 
       // Check if session folder exists
       if (fs.existsSync(sessionPath)) {
-        console.log(`[${userId}] Auto-reconnecting with saved session...`);
-        // Initialize client (will use saved session)
-        initializeClient(userId).catch(err => {
+        console.log(`[${userId}] Auto-reconnecting with saved session (silent mode)...`);
+        // Initialize client in silent mode (won't generate QR if session is invalid)
+        initializeClientSilent(userId).catch(err => {
           console.error(`[${userId}] Auto-reconnect failed:`, err.message);
         });
         // Small delay between initializations to avoid overwhelming
@@ -888,6 +1386,218 @@ async function autoReconnectUsers() {
   }
 }
 
+// Silent initialization - only reconnects if session is already valid
+// Does NOT generate QR codes - user must go to /setup for that
+async function initializeClientSilent(userId) {
+  const currentState = getUserState(userId);
+
+  // If already ready or initializing, skip
+  if (currentState === 'ready' || currentState === 'initializing' || currentState === 'authenticated') {
+    console.log(`[${userId}] Silent init skipped - already in state: ${currentState}`);
+    return { status: currentState };
+  }
+
+  console.log(`[${userId}] Silent initialization (no QR generation)...`);
+  setUserState(userId, 'initializing');
+
+  // Cleanup any existing client first
+  await cleanupClient(userId);
+
+  const puppeteerArgs = [
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-dev-shm-usage',
+    '--disable-accelerated-2d-canvas',
+    '--no-first-run',
+    '--disable-gpu',
+  ];
+
+  const puppeteerConfig = {
+    headless: true,
+    args: puppeteerArgs,
+    timeout: 120000,
+  };
+
+  if (process.env.PUPPETEER_EXECUTABLE_PATH) {
+    puppeteerConfig.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
+  }
+
+  const client = new Client({
+    authStrategy: new LocalAuth({
+      clientId: userId,
+      dataPath: path.join(__dirname, '.wwebjs_sessions'),
+    }),
+    puppeteer: puppeteerConfig,
+    qrMaxRetries: 0, // Don't retry QR - if session is invalid, just fail
+  });
+
+  userClients.set(userId, client);
+
+  // Handle QR code - in silent mode, we DON'T store it, just mark as needing setup
+  client.on('qr', async () => {
+    console.log(`[${userId}] Session invalid - QR required. User needs to visit /setup`);
+    setUserState(userId, 'idle'); // Reset to idle - user needs to manually reconnect
+    await cleanupClient(userId);
+    // Mark user as disconnected in database
+    if (User) {
+      await User.findByIdAndUpdate(userId, { waConnected: false });
+    }
+  });
+
+  // Handle authentication (session restored successfully)
+  client.on('authenticated', () => {
+    console.log(`[${userId}] Session restored successfully`);
+    setUserState(userId, 'authenticated');
+  });
+
+  // Handle loading screen
+  client.on('loading_screen', (percent, message) => {
+    console.log(`[${userId}] Loading: ${percent}% - ${message}`);
+  });
+
+  // Handle ready - session is valid and connected
+  client.on('ready', async () => {
+    console.log(`[${userId}] Client ready (silent reconnect successful)!`);
+    setUserState(userId, 'ready');
+
+    // Cache contacts for admin matching
+    try {
+      const contacts = await client.getContacts();
+      const contactMap = new Map();
+      for (const contact of contacts) {
+        const phone = contact.id?.user || contact.number;
+        const name = contact.pushname || contact.name || contact.verifiedName || '';
+        if (phone && name) {
+          contactMap.set(phone, name);
+        }
+      }
+      userContactsCache.set(userId, contactMap);
+      console.log(`[${userId}] Cached ${contactMap.size} contacts for admin matching`);
+    } catch (e) {
+      console.log(`[${userId}] Failed to cache contacts: ${e.message}`);
+    }
+
+    try {
+      if (User) {
+        await User.findByIdAndUpdate(userId, {
+          waConnected: true,
+          waLastSeen: new Date(),
+        });
+      }
+
+      // Sync groups
+      const chats = await client.getChats();
+      const groups = chats.filter(chat => chat.isGroup);
+      console.log(`[${userId}] Found ${groups.length} groups`);
+
+      if (Group) {
+        for (const group of groups) {
+          try {
+            await Group.findOneAndUpdate(
+              { userId, groupId: group.id._serialized },
+              {
+                userId,
+                groupId: group.id._serialized,
+                groupName: group.name,
+                isActive: true,
+              },
+              { upsert: true }
+            );
+          } catch (err) {
+            // Ignore individual group errors
+          }
+        }
+
+        // Background member sync
+        if (Snapshot) {
+          syncMemberCounts(userId, client, groups).catch(err => {
+            console.error(`[${userId}] Background sync error:`, err.message);
+          });
+        }
+
+        // Start 30-minute auto sync
+        startAutoSync(userId);
+      }
+    } catch (err) {
+      console.error(`[${userId}] Error in silent ready handler:`, err);
+    }
+  });
+
+  // Handle disconnection
+  client.on('disconnected', async (reason) => {
+    console.log(`[${userId}] Disconnected: ${reason}`);
+    setUserState(userId, 'idle');
+    stopAutoSync(userId);
+    await cleanupClient(userId);
+
+    if (User) {
+      await User.findByIdAndUpdate(userId, { waConnected: false });
+    }
+  });
+
+  // Handle auth failure - session is invalid
+  client.on('auth_failure', async (msg) => {
+    console.log(`[${userId}] Auth failure (session expired): ${msg}`);
+    setUserState(userId, 'idle');
+    await cleanupClient(userId);
+
+    if (User) {
+      await User.findByIdAndUpdate(userId, { waConnected: false });
+    }
+  });
+
+  // Add message handlers (same as regular init)
+  client.on('message', async (message) => {
+    try {
+      if (message.from && message.from.includes('@g.us')) {
+        await handleGroupMessage(userId, message, client);
+      }
+    } catch (err) {
+      // Silently ignore
+    }
+  });
+
+  client.on('message_create', async (message) => {
+    try {
+      if (message.fromMe && message.to && message.to.includes('@g.us')) {
+        const modifiedMessage = { ...message, from: message.to };
+        await handleGroupMessage(userId, modifiedMessage, client);
+      }
+    } catch (err) {
+      // Silently ignore
+    }
+  });
+
+  client.on('group_join', async (notification) => {
+    try {
+      await handleMemberJoin(userId, notification);
+    } catch (err) {
+      console.error(`[${userId}] Error in group_join handler:`, err.message);
+    }
+  });
+
+  client.on('group_leave', async (notification) => {
+    try {
+      await handleMemberLeave(userId, notification);
+    } catch (err) {
+      console.error(`[${userId}] Error in group_leave handler:`, err.message);
+    }
+  });
+
+  // Initialize
+  client.initialize().catch(async (err) => {
+    console.error(`[${userId}] Silent init error:`, err.message);
+    setUserState(userId, 'idle');
+    await cleanupClient(userId);
+
+    if (User) {
+      await User.findByIdAndUpdate(userId, { waConnected: false });
+    }
+  });
+
+  return { status: 'initializing' };
+}
+
 app.listen(PORT, () => {
   console.log(`WhatsApp service running on port ${PORT}`);
   console.log(`Frontend URL: ${FRONTEND_URL}`);
@@ -895,6 +1605,10 @@ app.listen(PORT, () => {
 
   // Start daily export scheduler
   scheduleDailyExport();
+
+  // Schedule daily/weekly message count resets
+  scheduleDailyResets();
+  console.log('Daily/weekly message count resets scheduled');
 
   // Auto-reconnect users with saved sessions after a delay
   setTimeout(autoReconnectUsers, 3000);

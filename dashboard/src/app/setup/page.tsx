@@ -38,6 +38,13 @@ export default function SetupPage() {
         setQrCode(data.qrCode)
       } else if (data.status === 'initializing' || data.status === 'waiting') {
         setStatus(data.status)
+      } else if (data.status === 'idle') {
+        // Not initialized yet - trigger initialization
+        if (!initCalledRef.current) {
+          initCalledRef.current = true
+          await fetch('/api/whatsapp/qr', { method: 'POST' })
+        }
+        setStatus('initializing')
       } else if (data.status === 'error' || data.error) {
         setStatus('error')
         setError(data.message || data.error || 'Connection failed')

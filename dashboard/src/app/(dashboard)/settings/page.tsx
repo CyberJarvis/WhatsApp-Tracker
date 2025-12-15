@@ -29,11 +29,12 @@ export default function SettingsPage() {
   const [sheetsUrl, setSheetsUrl] = useState('')
   const [waConnected, setWaConnected] = useState(false)
 
-  // Service account email (you would get this from environment)
-  const serviceAccountEmail = 'whatsapp-analytics-bot@whatsapp-analytics-481111.iam.gserviceaccount.com'
+  // Service account email from environment variable
+  const serviceAccountEmail = process.env.NEXT_PUBLIC_GOOGLE_SERVICE_ACCOUNT_EMAIL || ''
 
   useEffect(() => {
     fetchSettings()
+    fetchWhatsAppStatus()
   }, [])
 
   const fetchSettings = async () => {
@@ -44,12 +45,24 @@ export default function SettingsPage() {
       if (res.ok) {
         setName(data.name || '')
         setSheetsUrl(data.sheetsId || '')
-        setWaConnected(data.waConnected || false)
       }
     } catch (error) {
       console.error('Error fetching settings:', error)
     } finally {
       setIsLoading(false)
+    }
+  }
+
+  const fetchWhatsAppStatus = async () => {
+    try {
+      const res = await fetch('/api/whatsapp/status')
+      const data = await res.json()
+
+      if (res.ok) {
+        setWaConnected(data.isConnected || false)
+      }
+    } catch (error) {
+      console.error('Error fetching WhatsApp status:', error)
     }
   }
 
@@ -79,13 +92,20 @@ export default function SettingsPage() {
     }
   }
 
-  const handleReconnectWhatsApp = () => {
-    // Disconnect current session and redirect to setup
-    fetch('/api/whatsapp/disconnect', { method: 'POST' })
-      .then(() => {
-        router.push('/setup')
-      })
-      .catch(console.error)
+  const handleReconnectWhatsApp = async () => {
+    try {
+      // First disconnect the current session
+      await fetch('/api/whatsapp/disconnect', { method: 'POST' })
+
+      // Then call retry to force a fresh client initialization
+      await fetch('/api/whatsapp/retry', { method: 'POST' })
+
+      // Redirect to setup page to show QR code
+      router.push('/setup')
+    } catch (error) {
+      console.error('Error reconnecting WhatsApp:', error)
+      router.push('/setup')
+    }
   }
 
   const copyServiceEmail = () => {

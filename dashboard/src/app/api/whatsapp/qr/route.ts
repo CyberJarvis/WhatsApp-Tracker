@@ -24,10 +24,13 @@ export async function GET() {
     return NextResponse.json(data)
   } catch (error) {
     console.error('Error getting QR code:', error)
-    return NextResponse.json({
-      status: 'error',
-      message: 'WhatsApp service not available. Please start the WhatsApp service.',
-    })
+    return NextResponse.json(
+      {
+        status: 'error',
+        message: 'WhatsApp service not available. Please start the WhatsApp service.',
+      },
+      { status: 503 }
+    )
   }
 }
 
@@ -55,9 +58,12 @@ export async function POST() {
     })
   } catch (error) {
     console.error('Error initializing WhatsApp:', error)
-    return NextResponse.json({
-      status: 'error',
-      message: 'WhatsApp service not available. Please start the WhatsApp service.',
-    })
+    return NextResponse.json(
+      {
+        status: 'error',
+        message: 'WhatsApp service not available. Please start the WhatsApp service.',
+      },
+      { status: 503 }
+    )
   }
 }

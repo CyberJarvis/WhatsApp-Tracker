@@ -3,7 +3,7 @@
  * Manages WhatsApp Web client using whatsapp-web.js
  */
 
-import { Client, LocalAuth, GroupChat } from 'whatsapp-web.js';
+import { Client, LocalAuth, GroupChat, Message } from 'whatsapp-web.js';
 import * as qrcode from 'qrcode-terminal';
 import { getConfig } from '../config';
 import logger, { logWhatsAppEvent } from '../utils/logger';
@@ -13,15 +13,37 @@ import { WhatsAppGroup } from '../types';
 // Rate limiting configuration
 const RATE_LIMIT_DELAY = 1000; // 1 second between API calls
 
+// Dashboard API configuration
+const DASHBOARD_API_URL = process.env.DASHBOARD_API_URL || 'http://localhost:3001'
+
+// Message batch configuration
+const MESSAGE_BATCH_SIZE = 10
+const MESSAGE_BATCH_INTERVAL = 5000 // 5 seconds
+
 /**
  * WhatsApp Service Class
  * Singleton pattern for managing WhatsApp client
  */
+interface MessageData {
+  messageId: string
+  groupId: string
+  senderId: string
+  senderName: string
+  senderPhone?: string
+  messageType: 'text' | 'image' | 'video' | 'audio' | 'document' | 'sticker' | 'other'
+  isAdmin: boolean
+  timestamp: string
+  userId: string
+}
+
 class WhatsAppService {
   private client: Client | null = null;
   private isReady: boolean = false;
   private isInitializing: boolean = false;
   private readyPromise: Promise<void> | null = null;
+  private messageBatch: MessageData[] = [];
+  private batchTimer: NodeJS.Timeout | null = null;
+  private userId: string | null = null; // Will be set from config or environment
 
   /**
    * Initialize the WhatsApp client
@@ -108,6 +130,15 @@ class WhatsAppService {
         logger.warn('WhatsApp client disconnected', { reason });
         this.isReady = false;
         this.isInitializing = false;
+      });
+
+      // Message received - track for analytics
+      this.client.on('message', async (message: Message) => {
+        try {
+          await this.handleIncomingMessage(message);
+        } catch (error) {
+          logger.error('Error handling message', { error: (error as Error).message });
+        }
       });
 
       // Start the client
@@ -283,6 +314,117 @@ class WhatsAppService {
     }
 
     return results;
+  }
+
+  /**
+   * Set the user ID for message tracking
+   */
+  setUserId(userId: string): void {
+    this.userId = userId;
+    logger.info('User ID set for message tracking', { userId: userId.substring(0, 8) + '...' });
+  }
+
+  /**
+   * Handle incoming message
+   */
+  private async handleIncomingMessage(message: Message): Promise<void> {
+    // Only track group messages
+    const chat = await message.getChat();
+    if (!chat.isGroup) return;
+
+    // Skip if no user ID configured
+    if (!this.userId) {
+      logger.debug('Skipping message - no user ID configured');
+      return;
+    }
+
+    // Get sender info
+    const contact = await message.getContact();
+    const groupChat = chat as GroupChat;
+
+    // Check if sender is admin
+    const participant = groupChat.participants?.find(
+      p => p.id._serialized === contact.id._serialized
+    );
+    const isAdmin = participant?.isAdmin || participant?.isSuperAdmin || false;
+
+    // Determine message type
+    let messageType: MessageData['messageType'] = 'text';
+    if (message.hasMedia) {
+      if (message.type === 'image') messageType = 'image';
+      else if (message.type === 'video') messageType = 'video';
+      else if (message.type === 'audio' || message.type === 'ptt') messageType = 'audio';
+      else if (message.type === 'document') messageType = 'document';
+      else if (message.type === 'sticker') messageType = 'sticker';
+      else messageType = 'other';
+    }
+
+    const messageData: MessageData = {
+      messageId: message.id._serialized,
+      groupId: chat.id._serialized,
+      senderId: contact.id._serialized,
+      senderName: contact.pushname || contact.name || contact.number || 'Unknown',
+      senderPhone: contact.number,
+      messageType,
+      isAdmin,
+      timestamp: new Date(message.timestamp * 1000).toISOString(),
+      userId: this.userId,
+    };
+
+    // Add to batch
+    this.messageBatch.push(messageData);
+
+    // Start batch timer if not running
+    if (!this.batchTimer) {
+      this.batchTimer = setTimeout(() => this.flushMessageBatch(), MESSAGE_BATCH_INTERVAL);
+    }
+
+    // Flush if batch is full
+    if (this.messageBatch.length >= MESSAGE_BATCH_SIZE) {
+      await this.flushMessageBatch();
+    }
+  }
+
+  /**
+   * Flush message batch to dashboard API
+   */
+  private async flushMessageBatch(): Promise<void> {
+    if (this.batchTimer) {
+      clearTimeout(this.batchTimer);
+      this.batchTimer = null;
+    }
+
+    if (this.messageBatch.length === 0) return;
+
+    const batch = [...this.messageBatch];
+    this.messageBatch = [];
+
+    try {
+      const response = await fetch(`${DASHBOARD_API_URL}/api/messages/incoming`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(batch),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        logger.error('Failed to send messages to dashboard', { error: errorData, statusCode: response.status });
+        return;
+      }
+
+      const result = await response.json() as { processed: number; total: number };
+      logger.info('Messages sent to dashboard', {
+        processed: result.processed,
+        total: result.total,
+      });
+    } catch (error) {
+      logger.error('Error sending messages to dashboard', {
+        error: (error as Error).message,
+        batchSize: batch.length,
+      });
+    }
   }
 }
 

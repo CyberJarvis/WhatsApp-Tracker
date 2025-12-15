@@ -1,5 +1,6 @@
 'use client';
 
+import { useState } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import { ArrowLeft } from 'lucide-react';
@@ -7,6 +8,10 @@ import { Header } from '@/components/layout/Header';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/Card';
 import { Badge } from '@/components/ui/Badge';
 import { MemberTrendChart } from '@/components/charts/MemberTrendChart';
+import { MessageStatsCard } from '@/components/messages/MessageStatsCard';
+import { ActivityHeatmap } from '@/components/messages/ActivityHeatmap';
+import { MemberLeaderboard } from '@/components/members/MemberLeaderboard';
+import { PeriodSelector, PeriodOption, DateRange } from '@/components/ui/PeriodSelector';
 import { ChartSkeleton } from '@/components/ui/Skeleton';
 import { useGroups } from '@/hooks/useGroups';
 import { useSnapshots } from '@/hooks/useSnapshots';
@@ -17,8 +22,44 @@ export default function GroupDetailPage() {
   const params = useParams();
   const groupId = decodeURIComponent(params.groupId as string);
 
+  // Period state
+  const [selectedPeriod, setSelectedPeriod] = useState<PeriodOption>('week');
+  const [customDateRange, setCustomDateRange] = useState<DateRange | undefined>();
+
+  const handlePeriodChange = (period: PeriodOption, customRange?: DateRange) => {
+    setSelectedPeriod(period);
+    if (period === 'custom' && customRange) {
+      setCustomDateRange(customRange);
+    }
+  };
+
+  // Map period to days for snapshots
+  const getPeriodDays = (period: PeriodOption): number => {
+    switch (period) {
+      case 'today': return 1;
+      case 'week': return 7;
+      case 'month': return 30;
+      case 'year': return 365;
+      case 'custom':
+        if (customDateRange) {
+          const from = new Date(customDateRange.from);
+          const to = new Date(customDateRange.to);
+          return Math.ceil((to.getTime() - from.getTime()) / (1000 * 60 * 60 * 24)) + 1;
+        }
+        return 7;
+      default: return 7;
+    }
+  };
+
+  // Map period to leaderboard period
+  const getLeaderboardPeriod = (period: PeriodOption): 'today' | 'week' | 'all' => {
+    if (period === 'today') return 'today';
+    if (period === 'week') return 'week';
+    return 'all';
+  };
+
   const { groups, isLoading: groupsLoading } = useGroups();
-  const { snapshots, isLoading: snapshotsLoading } = useSnapshots(groupId, 7);
+  const { snapshots, isLoading: snapshotsLoading } = useSnapshots(groupId, getPeriodDays(selectedPeriod));
 
   const group = groups.find(g => g.groupId === groupId);
 
@@ -30,6 +71,35 @@ export default function GroupDetailPage() {
     left: 0,
     netGrowth: 0,
   }));
+
+  // Calculate period change from snapshots
+  const calculatePeriodChange = (): number => {
+    if (snapshots.length < 2) return group?.todayGrowth || 0;
+
+    // Sort snapshots by timestamp (oldest first)
+    const sortedSnapshots = [...snapshots].sort(
+      (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+    );
+
+    const oldestMembers = sortedSnapshots[0]?.totalMembers || 0;
+    const latestMembers = sortedSnapshots[sortedSnapshots.length - 1]?.totalMembers || 0;
+
+    return latestMembers - oldestMembers;
+  };
+
+  // Get label for period change
+  const getPeriodChangeLabel = (): string => {
+    switch (selectedPeriod) {
+      case 'today': return "Today's Change";
+      case 'week': return "This Week's Change";
+      case 'month': return "This Month's Change";
+      case 'year': return "This Year's Change";
+      case 'custom': return "Period Change";
+      default: return "Today's Change";
+    }
+  };
+
+  const periodChange = calculatePeriodChange();
 
   if (groupsLoading) {
     return (
@@ -53,19 +123,26 @@ export default function GroupDetailPage() {
   return (
     <div className="flex flex-col">
       <Header
-        title={group.groupName}
+        title={group.groupName || 'Unnamed Group'}
         subtitle={`Group ID: ${groupId}`}
       />
 
       <div className="flex-1 space-y-6 p-6">
-        {/* Back Link */}
-        <Link
-          href="/groups"
-          className="inline-flex items-center gap-2 text-sm text-gray-600 hover:text-gray-900"
-        >
-          <ArrowLeft className="h-4 w-4" />
-          Back to Groups
-        </Link>
+        {/* Back Link and Period Selector */}
+        <div className="flex items-center justify-between">
+          <Link
+            href="/groups"
+            className="inline-flex items-center gap-2 text-sm text-gray-600 hover:text-gray-900"
+          >
+            <ArrowLeft className="h-4 w-4" />
+            Back to Groups
+          </Link>
+          <PeriodSelector
+            value={selectedPeriod}
+            onChange={handlePeriodChange}
+            customRange={customDateRange}
+          />
+        </div>
 
         {/* Stats Cards */}
         <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
@@ -75,9 +152,9 @@ export default function GroupDetailPage() {
           </Card>
 
           <Card>
-            <p className="text-sm text-gray-500">Today's Change</p>
-            <p className={`text-2xl font-bold ${getGrowthColor(group.todayGrowth)}`}>
-              {formatGrowth(group.todayGrowth)}
+            <p className="text-sm text-gray-500">{getPeriodChangeLabel()}</p>
+            <p className={`text-2xl font-bold ${getGrowthColor(periodChange)}`}>
+              {snapshotsLoading ? '...' : formatGrowth(periodChange)}
             </p>
           </Card>
 
@@ -96,10 +173,33 @@ export default function GroupDetailPage() {
           </Card>
         </div>
 
+        {/* Message Stats */}
+        <div className="space-y-4">
+          <h2 className="text-lg font-semibold text-gray-900">Message Activity</h2>
+          <MessageStatsCard
+            groupId={groupId}
+            period={selectedPeriod}
+            startDate={selectedPeriod === 'custom' ? customDateRange?.from : undefined}
+            endDate={selectedPeriod === 'custom' ? customDateRange?.to : undefined}
+          />
+        </div>
+
+        {/* Activity Heatmap & Leaderboard */}
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+          <ActivityHeatmap groupId={groupId} />
+          <MemberLeaderboard groupId={groupId} period={getLeaderboardPeriod(selectedPeriod)} limit={10} />
+        </div>
+
         {/* Member Trend Chart */}
         <Card>
           <CardHeader>
-            <CardTitle>Member Trend (7 Days)</CardTitle>
+            <CardTitle>
+              Member Trend ({selectedPeriod === 'today' ? 'Today' :
+                selectedPeriod === 'week' ? '7 Days' :
+                selectedPeriod === 'month' ? '30 Days' :
+                selectedPeriod === 'year' ? '365 Days' :
+                selectedPeriod === 'custom' ? 'Custom Range' : '7 Days'})
+            </CardTitle>
           </CardHeader>
           <CardContent>
             {snapshotsLoading ? (
